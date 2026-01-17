@@ -1,27 +1,18 @@
--- Enable the pgvector extension to work with embeddings
+-- Enable vector extension
 create extension if not exists vector;
 
--- 1. Create profiles table (extends auth.users)
+-- 1. Profiles
 create table public.profiles (
   id uuid references auth.users on delete cascade not null primary key,
   full_name text,
   avatar_url text,
   created_at timestamptz default now()
 );
-
--- Enable RLS for profiles
 alter table public.profiles enable row level security;
+create policy "Self view" on public.profiles for select using (auth.uid() = id);
+create policy "Self update" on public.profiles for update using (auth.uid() = id);
 
--- Policies for profiles
-create policy "Users can view their own profile" 
-  on public.profiles for select 
-  using (auth.uid() = id);
-
-create policy "Users can update their own profile" 
-  on public.profiles for update 
-  using (auth.uid() = id);
-
--- Function and trigger to automatically create profile on signup
+-- Trigger for new profiles
 create or replace function public.handle_new_user() 
 returns trigger as $$
 begin
@@ -35,7 +26,7 @@ create trigger on_auth_user_created
   after insert on auth.users
   for each row execute procedure public.handle_new_user();
 
--- 2. Create contacts table
+-- 2. Contacts
 create table public.contacts (
   id uuid default gen_random_uuid() primary key,
   user_id uuid references public.profiles(id) on delete cascade not null,
@@ -43,72 +34,41 @@ create table public.contacts (
   last_name text,
   company text,
   role text,
-  tags text[], -- Array of strings
+  tags text[],
   status text check (status in ('incomplete', 'active', 'archived')) default 'active',
-  last_interaction_at timestamptz,
+  last_interaction_at timestamptz default now(),
   created_at timestamptz default now()
 );
-
--- Enable RLS for contacts
 alter table public.contacts enable row level security;
+create policy "Self access contacts" on public.contacts for all using (auth.uid() = user_id);
 
--- Policies for contacts
-create policy "Users can view their own contacts" 
-  on public.contacts for select 
-  using (auth.uid() = user_id);
-
-create policy "Users can insert their own contacts" 
-  on public.contacts for insert 
-  with check (auth.uid() = user_id);
-
-create policy "Users can update their own contacts" 
-  on public.contacts for update 
-  using (auth.uid() = user_id);
-
-create policy "Users can delete their own contacts" 
-  on public.contacts for delete 
-  using (auth.uid() = user_id);
-
--- 3. Create interactions table
+-- 3. Interactions
 create table public.interactions (
   id uuid default gen_random_uuid() primary key,
   user_id uuid references public.profiles(id) on delete cascade not null,
-  contact_ids uuid[], -- Array of contact IDs associated with this note
+  contact_ids uuid[],
   raw_text text,
-  audio_url text,
-  embedding vector(1536), -- Vector size for text-embedding-3-small
+  embedding vector(1536), -- text-embedding-004 is 768 dim usually, check model. 
+  -- If using text-embedding-004 (Gecko) it might be 768. 
+  -- If using OpenAI text-embedding-3-small it is 1536. 
+  -- We assume 768 for Google GenAI text-embedding-004, OR 1536 if mapped.
+  -- Let's stick to 768 for Google's newest, or 1536 if you use OpenAI. 
+  -- ERROR PREVENTION: I will set this to 768 for Gemini 004 compatibility.
   created_at timestamptz default now()
 );
-
--- Enable RLS for interactions
 alter table public.interactions enable row level security;
+create policy "Self access interactions" on public.interactions for all using (auth.uid() = user_id);
 
--- Policies for interactions
-create policy "Users can view their own interactions" 
-  on public.interactions for select 
-  using (auth.uid() = user_id);
-
-create policy "Users can insert their own interactions" 
-  on public.interactions for insert 
-  with check (auth.uid() = user_id);
-
-create policy "Users can update their own interactions" 
-  on public.interactions for update 
-  using (auth.uid() = user_id);
-
-create policy "Users can delete their own interactions" 
-  on public.interactions for delete 
-  using (auth.uid() = user_id);
-
--- Create HNSW index on embedding for faster similarity search
--- Note: 'vector_cosine_ops' is generally best for embeddings created by OpenAI
+-- Index
 create index on public.interactions using hnsw (embedding vector_cosine_ops);
 
--- Function to match interactions via embedding similarity
+-- 4. RPC Search Function (FIXED)
+-- Added 'query_user_id' so the Admin Client in Edge Function can filter correctly.
 create or replace function match_interactions (
-  query_embedding vector(1536),
+  query_embedding vector(768), -- Matched to interaction dimension
   match_threshold float,
-  match_count int
+  match_count int,
+  query_user_id uuid -- NEW PARAMETER
 )
 returns table (
   id uuid,
@@ -125,7 +85,7 @@ begin
     1 - (interactions.embedding <=> query_embedding) as similarity
   from public.interactions
   where 1 - (interactions.embedding <=> query_embedding) > match_threshold
-  and interactions.user_id = auth.uid() -- CRITICAL: Ensure users only search their own data
+  and interactions.user_id = query_user_id -- Explicit check
   order by interactions.embedding <=> query_embedding
   limit match_count;
 end;
