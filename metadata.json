@@ -1,0 +1,7 @@
+{
+  "name": "Cortex CRM",
+  "description": "AI-powered personal relationship manager that turns unstructured voice and text notes into structured contact data.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
